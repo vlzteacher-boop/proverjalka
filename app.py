@@ -2,6 +2,7 @@ from flask import Flask
 import os
 import threading
 import logging
+import time
 
 app = Flask(__name__)
 
@@ -15,11 +16,14 @@ def health():
 
 def run_bot():
     """Запуск бота в отдельном потоке"""
-    try:
-        from bot import main
-        main()
-    except Exception as e:
-        logging.error(f"Bot error: {e}")
+    while True:
+        try:
+            from bot import main
+            main()
+        except Exception as e:
+            logging.error(f"Bot error: {e}")
+            logging.info("Перезапуск бота через 10 секунд...")
+            time.sleep(10)
 
 if __name__ == "__main__":
     # Запускаем бот в отдельном потоке
@@ -28,4 +32,4 @@ if __name__ == "__main__":
     
     # Запускаем Flask сервер
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=False)
