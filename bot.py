@@ -4,7 +4,7 @@ import sqlite3
 import json
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 # ====== НАСТРОЙКИ ======
 logging.basicConfig(
@@ -19,16 +19,11 @@ CHANNEL_ID = os.environ.get('CHANNEL_ID', '-1003810095854')
 
 # Проверка токена
 if not TOKEN:
-    logger.error("❌ Токен не найден! Установите переменную окружения TOKEN")
-    # Для Render: не завершаем работу, а ждем
-    import time
-    while not TOKEN:
-        logger.warning("⏳ Ожидаю установку переменной TOKEN...")
-        time.sleep(10)
-        TOKEN = os.environ.get('TOKEN')
+    logger.error("❌ Токен не найден!")
+    exit(1)
 
 # ====== БАЗА ДАННЫХ ======
-DB_FILE = "/tmp/homework.db"  # Для Render используем /tmp
+DB_FILE = "homework.db"
 
 def init_db():
     """Инициализация базы данных"""
@@ -72,12 +67,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 Список работ", callback_data='list')],
         [InlineKeyboardButton("✅ Отметить проверку", callback_data='check')],
         [InlineKeyboardButton("📈 Статистика", callback_data='stats')],
+        [InlineKeyboardButton("🆘 Помощь", callback_data='help')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
         "📚 *Бот для проверки работ*\n\n"
-        "Работает 24/7 на Render.com\n\n"
+        "Работает 24/7 на Render.com\n"
         "Выберите действие:",
         reply_markup=reply_markup,
         parse_mode='Markdown'
@@ -89,22 +85,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     if query.data == 'new':
-        await create_work_menu(query)
+        await show_class_selection(query)
     elif query.data == 'summary':
-        await summary_command(query)
+        await show_summary(query)
     elif query.data == 'list':
-        await list_works(query)
+        await show_list(query)
     elif query.data == 'check':
-        await check_menu(query)
+        await show_check_menu(query)
     elif query.data == 'stats':
-        await stats_command(query)
+        await show_stats(query)
+    elif query.data == 'help':
+        await show_help(query)
     elif query.data.startswith('class_'):
-        await process_class_selection(query, context)
+        await handle_class_selection(query, context)
     elif query.data.startswith('check_'):
         await mark_as_checked(query)
+    elif query.data == 'back':
+        await start_from_button(query)
 
-async def create_work_menu(query):
-    """Меню создания работы"""
+async def start_from_button(query):
+    """Старт из кнопки"""
+    keyboard = [
+        [InlineKeyboardButton("➕ Создать работу", callback_data='new')],
+        [InlineKeyboardButton("📊 Сводка", callback_data='summary')],
+        [InlineKeyboardButton("📋 Список работ", callback_data='list')],
+        [InlineKeyboardButton("✅ Отметить проверку", callback_data='check')],
+        [InlineKeyboardButton("📈 Статистика", callback_data='stats')],
+        [InlineKeyboardButton("🆘 Помощь", callback_data='help')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "📚 *Бот для проверки работ*\n\n"
+        "Работает 24/7 на Render.com\n"
+        "Выберите действие:",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def show_class_selection(query):
+    """Показать выбор класса"""
     keyboard = []
     for class_num in STUDENTS_DATABASE.keys():
         keyboard.append([InlineKeyboardButton(f"{class_num} класс", callback_data=f'class_{class_num}')])
@@ -119,7 +139,7 @@ async def create_work_menu(query):
         parse_mode='Markdown'
     )
 
-async def process_class_selection(query, context):
+async def handle_class_selection(query, context):
     """Обработка выбора класса"""
     class_num = query.data.replace('class_', '')
     context.user_data['class'] = class_num
@@ -127,10 +147,13 @@ async def process_class_selection(query, context):
     await query.edit_message_text(
         f"📝 *{class_num} класс*\n\n"
         f"Введите тему работы в формате:\n"
-        f"`Предмет: Тема --absent ученик1,ученик2`\n\n"
+        f"`Предмет: Тема`\n\n"
         f"*Пример:*\n"
-        f"`Алгебра: Контрольная работа --absent Ваня,Маша`\n\n"
-        f"*Доступные ученики:*\n" + "\n".join(f"• {s}" for s in STUDENTS_DATABASE[class_num]),
+        f"`Алгебра: Контрольная работа`\n\n"
+        f"Для указания отсутствующих добавьте в конце:\n"
+        f"`--absent Имя1, Имя2`\n\n"
+        f"*Полный пример:*\n"
+        f"`Алгебра: Тест --absent Ваня, Маша`",
         parse_mode='Markdown'
     )
 
@@ -151,25 +174,24 @@ async def process_work_creation(update: Update, context: ContextTypes.DEFAULT_TY
         class_num = context.user_data['class']
         
         # Парсим сообщение
-        if ':' in text:
-            subject, rest = text.split(':', 1)
-            subject = subject.strip()
-            
-            # Проверяем наличие --absent
-            if '--absent' in rest:
-                topic_part, absent_part = rest.split('--absent', 1)
-                topic = topic_part.strip()
-                absent_students = [s.strip() for s in absent_part.split(',')]
-            else:
-                topic = rest.strip()
-                absent_students = []
+        if '--absent' in text:
+            main_part, absent_part = text.split('--absent', 1)
+            absent_students = [s.strip() for s in absent_part.split(',')]
         else:
-            subject = "Не указан"
-            topic = text
+            main_part = text
             absent_students = []
         
+        # Разделяем предмет и тему
+        if ':' in main_part:
+            subject, topic = main_part.split(':', 1)
+            subject = subject.strip()
+            topic = topic.strip()
+        else:
+            subject = "Не указан"
+            topic = main_part.strip()
+        
         # Получаем список всех учеников
-        all_students = STUDENTS_DATABASE[class_num]
+        all_students = STUDENTS_DATABASE.get(class_num, [])
         submitted_students = [s for s in all_students if s not in absent_students]
         
         # Сохраняем в базу
@@ -250,10 +272,10 @@ async def process_work_creation(update: Update, context: ContextTypes.DEFAULT_TY
         
     except Exception as e:
         logger.error(f"Ошибка создания работы: {e}")
-        await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+        await update.message.reply_text(f"❌ Ошибка: {str(e)}\n\nПопробуйте еще раз: /start")
 
-async def summary_command(query):
-    """Команда сводки"""
+async def show_summary(query):
+    """Показать сводку"""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -286,7 +308,11 @@ async def summary_command(query):
                 text += f"• ID{work[0]}: {work[1]} класс - {work[2][:30]}...\n"
                 text += f"  👥 {work[3]} учеников\n\n"
         
-        keyboard = [[InlineKeyboardButton("🔄 Обновить", callback_data='summary')]]
+        keyboard = [
+            [InlineKeyboardButton("✅ Отметить проверку", callback_data='check')],
+            [InlineKeyboardButton("📋 Список работ", callback_data='list')],
+            [InlineKeyboardButton("🔙 Назад", callback_data='back')],
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -295,8 +321,8 @@ async def summary_command(query):
         logger.error(f"Ошибка сводки: {e}")
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
 
-async def list_works(query):
-    """Список работ"""
+async def show_list(query):
+    """Показать список работ"""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -326,7 +352,7 @@ async def list_works(query):
         # Кнопки для быстрой проверки
         keyboard = []
         if works:
-            for work in works[:3]:  # Только 3 кнопки
+            for work in works[:3]:
                 keyboard.append([
                     InlineKeyboardButton(
                         f"✅ Проверить ID{work[0]}", 
@@ -335,6 +361,7 @@ async def list_works(query):
                 ])
         
         keyboard.append([InlineKeyboardButton("📊 Сводка", callback_data='summary')])
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back')])
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -343,8 +370,8 @@ async def list_works(query):
         logger.error(f"Ошибка списка работ: {e}")
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
 
-async def check_menu(query):
-    """Меню отметки проверки"""
+async def show_check_menu(query):
+    """Показать меню проверки"""
     await query.edit_message_text(
         "✅ *Отметка проверки*\n\n"
         "Введите ID работы в формате:\n"
@@ -386,6 +413,7 @@ async def mark_as_checked(query):
         keyboard = [
             [InlineKeyboardButton("📋 Список работ", callback_data='list')],
             [InlineKeyboardButton("📊 Сводка", callback_data='summary')],
+            [InlineKeyboardButton("🔙 Назад", callback_data='back')],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -395,8 +423,8 @@ async def mark_as_checked(query):
         logger.error(f"Ошибка отметки проверки: {e}")
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
 
-async def stats_command(query):
-    """Статистика"""
+async def show_stats(query):
+    """Показать статистику"""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -410,15 +438,6 @@ async def stats_command(query):
         cursor.execute("SELECT COUNT(*) FROM works WHERE status='checked'")
         checked = cursor.fetchone()[0] or 0
         
-        # Статистика по классам
-        cursor.execute('''
-            SELECT class, COUNT(*), 
-                   SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END)
-            FROM works 
-            GROUP BY class
-        ''')
-        class_stats = cursor.fetchall()
-        
         conn.close()
         
         text = f"📈 *Статистика*\n\n"
@@ -426,14 +445,13 @@ async def stats_command(query):
         text += f"⏳ На проверке: {pending}\n"
         text += f"✅ Проверено: {checked}\n\n"
         
-        if class_stats:
-            text += f"🏫 *По классам:*\n"
-            for stat in class_stats:
-                text += f"• {stat[0]} класс: {stat[1]} работ ({stat[2]} на проверке)\n"
+        text += f"📅 Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
         
-        text += f"\n📅 Обновлено: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        
-        keyboard = [[InlineKeyboardButton("🔄 Обновить", callback_data='stats')]]
+        keyboard = [
+            [InlineKeyboardButton("📊 Сводка", callback_data='summary')],
+            [InlineKeyboardButton("📋 Список работ", callback_data='list')],
+            [InlineKeyboardButton("🔙 Назад", callback_data='back')],
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -442,7 +460,44 @@ async def stats_command(query):
         logger.error(f"Ошибка статистики: {e}")
         await query.edit_message_text(f"❌ Ошибка: {str(e)}")
 
-# Команда /check для текстового ввода
+async def show_help(query):
+    """Показать помощь"""
+    help_text = """🆘 *Помощь*
+
+*Как создать работу:*
+1. Нажмите "Создать работу"
+2. Выберите класс
+3. Введите в формате:
+   `Предмет: Тема --absent Имя1, Имя2`
+
+*Примеры:*
+• `Алгебра: Контрольная`
+• `Математика: Тест --absent Ваня, Маша`
+• `Геометрия: Задачи`
+
+*Команды:*
+• `/check ID` - отметить работу как проверенную
+• `/start` - главное меню
+
+*Быстрые действия через кнопки:*
+• Создание работы
+• Просмотр сводки
+• Отметка проверки
+• Статистика
+
+*Поддержка:*
+Бот работает 24/7 на Render.com"""
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Создать работу", callback_data='new')],
+        [InlineKeyboardButton("📊 Сводка", callback_data='summary')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='back')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(help_text, reply_markup=reply_markup, parse_mode='Markdown')
+
+# Команда /check
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка команды /check"""
     if not context.args:
@@ -505,7 +560,6 @@ def main():
     # Запускаем бота
     logger.info("🤖 Бот запущен на Render.com")
     logger.info(f"📊 База данных: {DB_FILE}")
-    logger.info("🔄 Бот работает 24/7")
     
     application.run_polling()
 
