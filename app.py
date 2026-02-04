@@ -5,7 +5,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Telegram Bot is running on Render!"
+    return "✅ Telegram Bot is running on Render with PostgreSQL!"
 
 @app.route('/health')
 def health():
